@@ -36,6 +36,16 @@ def bucket(d):
 def main(pull=False):
     if pull:
         import pull_data; pull_data.main()
+        # Stage 1: overlay multi-book CONSENSUS 3-way (sharper than ESPN's single DraftKings line)
+        # onto the freshly-pulled fixtures. Best-effort: any failure (no key, quota, network) leaves
+        # the ESPN-based sheet fully intact, so the daily run can never be broken by the odds-api.
+        try:
+            import pull_odds_api; pull_odds_api.main()
+            import consensus; cstats = consensus.apply_to_files(DATA)
+            print(f"[consensus overlay: {cstats['overlaid']} games sharpened via odds-api, "
+                  f"{cstats['fallback']} kept ESPN fallback]")
+        except Exception as e:
+            print(f"[consensus overlay skipped ({e}) — using ESPN DraftKings odds]")
     try:
         fixtures = json.load(open(f"{DATA}/fixtures.json"))
     except (FileNotFoundError, ValueError):
@@ -130,7 +140,7 @@ def main(pull=False):
         import bracket
         br = bracket.run()
         print("\n" + "=" * 60)
-        print("CHAMPION / SUBCAMPEÓN (bracket-consistent, Elo projection):")
+        print(f"CHAMPION / SUBCAMPEÓN (bracket-consistent, {br.get('anchor', 'Elo projection')}):")
         print(f"  🏆 Campeón:    {br['champion']}  ({br['champ_prob']*100:.0f}% of sims)")
         print(f"  🥈 Subcampeón: {br['runner_up']}  (top final opponent of {br['champion']}, opposite half)")
         print("  Top title contenders: " + ", ".join(f"{t} {p*100:.0f}%" for t, p in br["top_champions"][:5]))

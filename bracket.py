@@ -17,7 +17,7 @@ into the 8 third-slots in match order) — thirds are weak and this only changes
 third faces, with negligible effect on title/runner-up odds. Groups use Elo, not the daily market
 odds (the daily PICKS still use market odds; this is a separate tournament projection).
 """
-import json, os, math, random
+import json, os, math, random, unicodedata
 from collections import Counter
 
 DATA = os.path.expanduser("~/wc-pool/data")
@@ -40,7 +40,12 @@ GROUPS = {
  "L": ["England", "Croatia", "Ghana", "Panama"],
 }
 DEFAULT_ELO = 1500
-def elo(t): return ELO.get(t, DEFAULT_ELO)
+# _RATINGS is the live strength table the sim reads. Default = raw Elo; run() swaps in ratings
+# RE-RATED to the betting market's title distribution when data/odds_api.json is present (Elo runs
+# hotter than the market AND disagrees on ordering — e.g. the market rates France/England above our
+# Elo and Argentina below it, so a simple flatten is insufficient; we re-rate to match the market).
+_RATINGS = dict(ELO)
+def elo(t): return _RATINGS.get(t, DEFAULT_ELO)
 
 # R32 (matches 73-88): each slot is ('W',group) winner, ('R',group) runner-up, ('T',i) i-th third.
 R32 = [
@@ -133,10 +138,78 @@ def sim_tournament(known=None):
     runner = sfw[1] if champ == sfw[0] else sfw[0]
     return champ, runner
 
-def run(n=20000, seed=20260613, known=None):
-    random.seed(seed)
+# ---- market re-rating: anchor the sim's title distribution to the betting market ----
+_BY_LOWER = {unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode().lower(): t
+             for ts in GROUPS.values() for t in ts}
+# Canonical-name aliases for EVERY spelling the winner market might use (both the odds-api forms seen
+# today AND the ESPN-style variants) -> GROUPS key. Hardened beyond the 2 live cases so a provider
+# spelling switch can never SILENTLY drop a team from the market re-rating (the R1 Bosnia bug class).
+_CANON_ALIAS = {
+    "czech republic": "Czechia", "bosnia and herzegovina": "Bosnia", "bosnia": "Bosnia",
+    "turkiye": "Turkey", "cabo verde": "Cape Verde", "korea republic": "South Korea",
+    "south korea": "South Korea", "congo dr": "DR Congo", "dr congo": "DR Congo",
+    "united states": "USA", "usa": "USA", "ivory coast": "Ivory Coast",
+    "cote divoire": "Ivory Coast", "curacao": "Curacao",
+}
+def _canon(name):
+    # mirror consensus.norm (& -> and, strip '.' '-' ') so odds-api names like "Bosnia & Herzegovina"
+    # / "Czech Republic" / "Côte d'Ivoire" canonicalize consistently with the picks side.
+    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    s = s.lower().replace("&", "and").replace(".", "").replace("-", " ").replace("'", "").strip()
+    return _CANON_ALIAS.get(s) or _BY_LOWER.get(s) or name
+
+def market_title_probs(path=None):
+    """{GROUPS-name: title_prob} from data/odds_api.json winner market (renormalized over the field)."""
+    path = path or f"{DATA}/odds_api.json"
+    try:
+        wp = json.load(open(path)).get("winner_probs", {})
+    except Exception:
+        return {}
+    out = {}
+    for name, p in wp.items():
+        c = _canon(name)
+        if c in TEAM_GROUP:
+            out[c] = out.get(c, 0.0) + p
+    s = sum(out.values())
+    return {t: p / s for t, p in out.items()} if s > 0 else {}
+
+def calibrate_to_market(market, known, iters=12, n=6000, seed=20260613, K=18.0, max_delta=220.0):
+    """Iteratively nudge team ratings so the sim's title probabilities match the market's.
+    R_t += K * log(market_t / sim_t): teams the sim under-rates vs the market get boosted, and
+    vice-versa. Preserves the EXACT bracket structure; only the strengths are re-anchored.
+
+    Stability (title prob is a steep function of rating through the bracket, so naive steps diverge):
+      - SMALL gain K with many iters (gradient descent, not a one-shot jump),
+      - per-step move clipped to +/-K so a near-zero sim prob can't launch a longshot,
+      - total drift from Elo clipped to +/-max_delta so re-rating refines, never fabricates."""
+    global _RATINGS
+    R = dict(ELO)
+    for it in range(iters):
+        _RATINGS = R
+        random.seed(seed + it)
+        champs = Counter()
+        for _ in range(n):
+            c, _r = sim_tournament(known); champs[c] += 1
+        for t, mp in market.items():
+            sp = champs.get(t, 0) / n
+            step = K * math.log(max(mp, 1e-4) / max(sp, 1e-4))
+            step = max(-K, min(K, step))                          # clip per-step move
+            base = ELO.get(t, DEFAULT_ELO)
+            R[t] = max(base - max_delta, min(base + max_delta, R.get(t, base) + step))
+    return R
+
+def run(n=20000, seed=20260613, known=None, use_market=True):
+    global _RATINGS
     if known is None:
         known = load_known_results()
+    market = market_title_probs() if use_market else {}
+    if market:
+        _RATINGS = calibrate_to_market(market, known)
+        anchor = "market-anchored (odds-api title odds)"
+    else:
+        _RATINGS = dict(ELO)
+        anchor = "Elo projection"
+    random.seed(seed)
     champs = Counter(); finals = Counter()  # finals[(champ,runner)]
     for _ in range(n):
         c, r = sim_tournament(known); champs[c] += 1; finals[(c, r)] += 1
@@ -144,7 +217,7 @@ def run(n=20000, seed=20260613, known=None):
     # runner-up = most common FINAL OPPONENT of the chosen champion (opposite-half by construction)
     opp = Counter({r: cnt for (c, r), cnt in finals.items() if c == champ})
     runner = opp.most_common(1)[0][0]
-    return {"n": n, "champion": champ, "runner_up": runner,
+    return {"n": n, "champion": champ, "runner_up": runner, "anchor": anchor,
             "champ_prob": champs[champ] / n,
             "runner_prob_given_champ": opp[runner] / max(1, sum(opp.values())),
             "top_champions": [(t, round(c / n, 3)) for t, c in champs.most_common(6)],
