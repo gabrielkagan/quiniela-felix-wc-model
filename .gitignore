@@ -1,0 +1,17 @@
+# secrets — NEVER commit
+.env
+.env.*
+
+# python
+__pycache__/
+*.pyc
+
+# regenerated state (produced by daily_run.py --pull; not source)
+data/fixtures.json
+data/picks_prev.json
+
+# backtest corpus — public data, re-fetched via scripts/fetch_backtest.sh (keeps repo code-only)
+data/backtest/
+
+# OS
+.DS_Store
