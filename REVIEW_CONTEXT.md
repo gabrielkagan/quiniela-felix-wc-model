@@ -4,6 +4,13 @@
 A market-anchored Dixon-Coles model that picks group-stage scorelines to MAXIMIZE EXPECTED POINTS
 under the Quiniela Felix pool scoring. The user is chasing from mid-table and wants to win.
 
+## STAGE 1 (SHIPPED 2026-06-14) — read before reviewing
+Picks are now fit to a **multi-book CONSENSUS 3-way** (`consensus.py` overlays the-odds-api Pinnacle-
+weighted de-vig onto ESPN fixtures in `daily_run --pull`; ESPN DraftKings is the fallback). The
+bracket sim is **re-rated to the betting market's title odds** (`bracket.calibrate_to_market`), not raw
+Elo. **Reviewers MUST NOT run `daily_run.py --pull` or `pull_odds_api.py`** — they spend paid the-odds-
+api credits. Run `daily_run.py` (no --pull), `fast_model.py` (equivalence twin), `validate.py` instead.
+
 ## Scoring rule (the objective function)
 - Exact score (both teams' goals) = **12 pts**
 - Correct result only (winner or draw) = **5 pts**
@@ -12,6 +19,9 @@ under the Quiniela Felix pool scoring. The user is chasing from mid-table and wa
 
 ## Files (review ALL of these — the orchestrator + puller + bracket are edit-sensitive, not just the model)
 - `~/wc-pool/wc_model.py` — the per-match engine (de-vig, Dixon-Coles fit, evpick = EV-max under 12/5/2).
+- `~/wc-pool/consensus.py` — overlays multi-book consensus 3-way onto fixtures (accent+alias join, ESPN fallback).
+- `~/wc-pool/pull_odds_api.py` — fetches the-odds-api consensus + WC-winner title market (PAID; don't run in review).
+- `~/wc-pool/fast_model.py` — numpy equivalence twin of wc_model (run it to confirm 0 mismatches after model edits).
 - `~/wc-pool/daily_run.py` — orchestrator: scores played games (id-keyed ledger), regenerates picks, diffs, buckets by FECHA/KNOCKOUT, prints the bracket champion/runner-up.
 - `~/wc-pool/pull_data.py` — fetches fixtures + DraftKings 3-way odds; atomic write with abort-guard.
 - `~/wc-pool/bracket.py` — Monte-Carlo tournament sim for CHAMPION / RUNNER-UP. Champion+runner-up MUST
