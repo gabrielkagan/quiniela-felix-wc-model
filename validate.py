@@ -13,12 +13,10 @@ the model is market-anchored, so any league with a sharp closing line tests the 
 Reuses wc_model.{fit,grid,evpick,pts,devig,rcls} verbatim — zero reimplementation, so a harness
 "pass" is a statement about the production code, not a parallel copy of it.
 """
-import csv, functools, glob, math, os, statistics, sys
+import csv, glob, math, os, statistics
+import numpy as np
 import wc_model as M
-
-# Speed: pois() is called with L only on the fit's 0.05 lambda-grid (~110 values) x n in 0..10,
-# so ~1200 distinct calls. Caching it leaves results identical and makes fit() ~10x faster.
-M.pois = functools.lru_cache(maxsize=None)(M.pois)
+import fast_model as F   # equivalence-gated vectorized twin (see fast_model.py __main__)
 
 BT = os.path.expanduser("~/wc-pool/data/backtest")
 RANGE = range(7)  # candidate scoreline space, matches evpick()
@@ -60,7 +58,17 @@ def fav_score(o):
     return (1, 1)
 
 def modal(g):
-    return max(((hp, ap) for hp in RANGE for ap in RANGE), key=lambda s: g.get(s, 0.0))
+    """most-likely scoreline within the candidate space, from a (11,11) numpy grid."""
+    sub = g[:7, :7]
+    return divmod(int(np.argmax(sub)), 7)
+
+
+def targets(o):
+    tw, td, tl = M.devig(o)
+    ou = o.get("ou") or 2.5
+    sp = o.get("spread")
+    tgt = (-float(sp)) if sp is not None else None
+    return tw, td, tl, ou, tgt
 
 def rps_ordered(p, actual):
     """Ranked Probability Score for ordered (H,D,A) — proper score for ordinal result."""
@@ -73,9 +81,10 @@ def main():
     rows = load_rows()
     n = len(rows)
     print(f"corpus: {n} matches with Pinnacle closing odds + actual scores (FULL, no subsample)\n")
+    C = F.build()   # precompute the vectorized grid tensor once (production RHO/weights)
 
     methods = {
-        "model (evpick EV-max)": lambda g, o: M.evpick(g),
+        "model (evpick EV-max)": lambda g, o: F.evpick(g),
         "grid modal (argmax P)": lambda g, o: modal(g),
         "fav 1-0 / 0-1 / 1-1":   lambda g, o: fav_score(o),
         "always 1-1":            lambda g, o: (1, 1),
@@ -89,7 +98,8 @@ def main():
 
     for row in rows:
         o, H, A = row["o"], row["H"], row["A"]
-        g = M.grid(*M.fit(o))                      # fit + grid ONCE per match; reused everywhere
+        i, j = F.fit_idx(C, *targets(o))           # vectorized fit (== wc_model.fit)
+        g = C["Gn"][i, j]                          # (11,11) numpy grid
         for name, fn in methods.items():
             hp, ap = fn(g, o)
             per_game[name].append(M.pts(hp, ap, H, A))
@@ -97,13 +107,14 @@ def main():
                 exact_hits[name] += 1
         # result-prob calibration: model grid vs raw de-vig market (both proper-scored)
         actual = (1, 0, 0) if H > A else ((0, 1, 0) if H == A else (0, 0, 1))
-        rps_model.append(rps_ordered(M.outcome(g), actual))
+        rps_model.append(rps_ordered((C["pw"][i, j], C["pd"][i, j], C["pl"][i, j]), actual))
         rps_market.append(rps_ordered(M.devig(o), actual))
         # scoreline calibration: Brier on P(exact actual) + full reliability over every candidate score
-        exact_brier.append((1 - g.get((H, A), 0.0)) ** 2)
+        pe = float(g[H, A]) if H < M.GRID_MAX and A < M.GRID_MAX else 0.0
+        exact_brier.append((1 - pe) ** 2)
         for hp in RANGE:
             for ap in RANGE:
-                p = g.get((hp, ap), 0.0)
+                p = float(g[hp, ap])
                 bb = rel.setdefault(min(9, int(p * 20)), [0.0, 0, 0])
                 bb[0] += p; bb[1] += 1; bb[2] += 1 if (hp, ap) == (H, A) else 0
 
