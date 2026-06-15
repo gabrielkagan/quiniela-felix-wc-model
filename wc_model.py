@@ -4,22 +4,25 @@ Pipeline: de-vig DraftKings 3-way moneylines -> fit Dixon-Coles (lambda_home, la
 de-vigged 3-way + over/under + Asian-handicap spread -> pick the scoreline maximizing expected
 points under the pool's 12/5/2 rule (evpick).
 
-PICK RULE (evpick): maximize expected points. Ties within EV_EPS are broken toward higher
-exact-probability ONLY within the EV-max result class (a free ~0-EV nudge that raises expected
-exact-count, the pool tiebreaker, and NEVER punts a clear favorite to a draw/upset).
+PICK RULE (evpick): maximize expected points. GENUINE EV ties (EV_EPS=0.0) are broken toward
+higher exact-probability ONLY within the EV-max result class — a truly free tiebreak that raises
+expected exact-count (the pool tiebreaker) without sacrificing any EV, and NEVER punts a clear
+favorite to a draw/upset.
 
 DESIGN HISTORY (adv R1-R8): an earlier variance-chasing layer (cross-class "coinflip" flips,
 hybrid draw-lottery, P(win) simulation) was REJECTED — R6/R7 proved its apparent P(win) edge was a
 self-consistency artifact (it loses to simpler rules under an independent DGP and collapses if any
 rival also chases), and R8 showed its residual flip still punted a favorite. Conclusion: maximize
 EXPECTED POINTS, full stop. No P(win) claim is made; the sim files are retained only as the
-disproof of the variance thesis. EV_EPS>=0.2 all produce the identical sheet (within-class tiebreak
-saturates); total EV given up to the exact-tiebreak is 0.06 pts across all 69 games.
+disproof of the variance thesis. EV_EPS=0.0 so the within-class exact-prob tiebreak fires only on
+genuine EV ties — it gives up exactly 0 EV (a loose EV_EPS=0.2 was found 2026-06-15 to sacrifice
+0.024 pts/run by picking higher-exact-prob-but-lower-EV scorelines, a within-class variance trade
+that contradicts the EV-max objective; tightened to 0.0).
 """
 import json, math
 from itertools import product
 RHO=-0.13; GRID_MAX=11; LAM_MAX=5.5
-TOTAL_W=0.20; SUP_W=0.15; EV_EPS=0.2
+TOTAL_W=0.20; SUP_W=0.15; EV_EPS=0.0
 def pois(n,L): return math.exp(-L)*L**n/math.factorial(n)
 def tau(x,y,lh,la):
     if x==0 and y==0: return 1-lh*la*RHO
@@ -61,10 +64,10 @@ def pts_shootout(pred_winner, actual_winner):
     pred_winner/actual_winner are team identifiers (or None). Returns 5 if matched else 0."""
     return 5 if (pred_winner is not None and pred_winner == actual_winner) else 0
 def evpick(g, eps=None):
-    """Guarded EV-max: pick the expected-points-maximizing scoreline; break ties (within EV_EPS)
-    toward higher exact-probability, but ONLY within the EV-max result class — so the exact-prob
-    tiebreak is free (~0 EV) and a clear favorite is NEVER punted to a draw/upset (adv R8 fix:
-    the cross-class flip branch is removed; we maximize expected points, full stop)."""
+    """Guarded EV-max: pick the expected-points-maximizing scoreline; break GENUINE EV ties
+    (EV_EPS=0.0) toward higher exact-probability, but ONLY within the EV-max result class — so the
+    exact-prob tiebreak is truly free (0 EV) and a clear favorite is NEVER punted to a draw/upset
+    (adv R8 fix: the cross-class flip branch is removed; we maximize expected points, full stop)."""
     eps=EV_EPS if eps is None else eps
     cands=[]
     for hp,ap in product(range(7),range(7)):
