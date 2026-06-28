@@ -23,6 +23,14 @@ import json, math
 from itertools import product
 RHO=-0.13; GRID_MAX=11; LAM_MAX=5.5
 TOTAL_W=0.20; SUP_W=0.15; EV_EPS=0.0
+# ulp-noise absorbers for evpick's deterministic tiebreak. At integer lambda Poisson P(k)=P(k-1)
+# exactly, so two scorelines (e.g. (2,0)/(3,0)) can be EV- AND exact-prob-identical to within float
+# rounding; scalar-sum (wc_model) vs einsum (fast_model) then round the last ulp differently and the
+# old strict `>=mx` filter let that ulp luck pick the winner -> twin divergence. These tolerances make
+# genuinely-equal candidates co-eligible so a deterministic GEOMETRY rule (fewest total goals, then
+# lowest (hp,ap)) decides, identically in both models. They are FAR below any real EV/prob gap (integer
+# points, probs ~O(0.1)), so they never trade away meaningful EV — unlike a loose EV_EPS (kept 0.0).
+_EV_TOL=1e-9; _PROB_TOL=1e-12
 def pois(n,L): return math.exp(-L)*L**n/math.factorial(n)
 def tau(x,y,lh,la):
     if x==0 and y==0: return 1-lh*la*RHO
@@ -67,15 +75,20 @@ def evpick(g, eps=None):
     """Guarded EV-max: pick the expected-points-maximizing scoreline; break GENUINE EV ties
     (EV_EPS=0.0) toward higher exact-probability, but ONLY within the EV-max result class — so the
     exact-prob tiebreak is truly free (0 EV) and a clear favorite is NEVER punted to a draw/upset
-    (adv R8 fix: the cross-class flip branch is removed; we maximize expected points, full stop)."""
+    (adv R8 fix: the cross-class flip branch is removed; we maximize expected points, full stop).
+    Residual EV/prob ties (e.g. (2,0) vs (3,0) at integer lambda) are resolved by a DETERMINISTIC,
+    ulp-independent geometry rule — fewest total goals, then lowest (hp,ap) — so fast_model's einsum
+    twin picks bit-identically (see _EV_TOL/_PROB_TOL note above)."""
     eps=EV_EPS if eps is None else eps
     cands=[]
     for hp,ap in product(range(7),range(7)):
         ev=sum(p*pts(hp,ap,H,A) for (H,A),p in g.items()); cands.append((ev,g.get((hp,ap),0.0),(hp,ap)))
     mx=max(c[0] for c in cands)
     ev_cls=rcls(*max(cands,key=lambda c:c[0])[2])
-    allowed=[c for c in cands if c[0]>=mx-eps and rcls(*c[2])==ev_cls]
-    return max(allowed,key=lambda c:c[1])[2]
+    allowed=[c for c in cands if c[0]>=mx-max(eps,_EV_TOL) and rcls(*c[2])==ev_cls]
+    pmax=max(c[1] for c in allowed)
+    tied=[c for c in allowed if c[1]>=pmax-_PROB_TOL]
+    return min(tied,key=lambda c:(c[2][0]+c[2][1],c[2]))[2]
 def fit_all(path=None):
     import os
     path = path or os.path.expanduser('~/wc-pool/data/fixtures.json')

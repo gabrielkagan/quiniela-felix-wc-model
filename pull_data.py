@@ -44,6 +44,10 @@ def main():
                 continue
             home = next((x for x in cs if x.get("homeAway") == "home"), cs[0])
             away = next((x for x in cs if x.get("homeAway") == "away"), cs[1])
+            # winner side (competitor `winner` flag). For a knockout decided on penalties ESPN records
+            # a level regulation/ET score (hs==as) yet still flags one competitor winner -> this lets
+            # daily_run score the Felix +5 shootout pick. None for draws/unfinished group games.
+            win = "home" if home.get("winner") else ("away" if away.get("winner") else None)
             eid = e.get("id")
             state = g(e, "status", "type", "state")
             odds = None
@@ -62,7 +66,7 @@ def main():
                              "home": g(home, "team", "displayName"),
                              "away": g(away, "team", "displayName"),
                              "hs": home.get("score"), "as": away.get("score"),
-                             "odds": odds})
+                             "win": win, "odds": odds})
             time.sleep(0.05)
         time.sleep(0.1)
 

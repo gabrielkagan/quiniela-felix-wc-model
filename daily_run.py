@@ -33,6 +33,41 @@ def bucket(d):
     iso = dt.strftime('%Y-%m-%d')
     return ((1, iso), f"KNOCKOUT {iso}")
 
+# KO objective extends the regulation EV-max pick (evpick) with the Felix +5 penalty-shootout free-roll,
+# which is unlocked ONLY by predicting a DRAW. So total E[pts] for a KO scoreline = regulation E[pts]
+# + (for a draw) P(reach pens)·P(SO pick correct)·5. We proxy P(reach pens) = draw_mass·KO_PEN_KAPPA
+# (the share of 90-min draws that survive extra time to penalties; ~half historically) and
+# P(SO correct) = 0.5 (a shootout is ~a coinflip; the small favorite edge is ignored, conservatively).
+# The single resulting flip-to-draw is robustness-checked stable across KO_PEN_KAPPA ∈ [0.30, 0.50].
+# HARD GUARDRAIL: never punt a clear market favorite (de-vig win prob ≥ 0.5) to a draw.
+# evpick (wc_model) stays the pure-regulation, validation-gated engine; this layer only adds the KO +5.
+KO_PEN_KAPPA = 0.50
+def ko_pick(g, o):
+    """Knockout pick. Returns (scoreline, so_slot|None): so_slot is 'home'/'away' when we predict a draw
+    (the stronger de-vig side is the +5 shootout pick — a SLOT, never a name, so ESPN renames can't drift
+    it), else None. A draw is chosen over the best non-draw only when its regulation EV plus the shootout
+    free-roll wins AND no clear favorite would be punted."""
+    base = M.evpick(g)                                   # validated regulation EV-max scoreline
+    tw, _td, tl = M.devig(o)
+    so_slot = "home" if tw >= tl else "away"
+    if base[0] == base[1]:                               # regulation EV-max is already a draw -> +5 unlocked
+        return base, so_slot
+    if max(tw, tl) >= 0.5:                               # clear favorite -> never punt to a draw
+        return base, None
+    reg = {(hp, ap): sum(p * M.pts(hp, ap, H, A) for (H, A), p in g.items())
+           for hp in range(7) for ap in range(7)}
+    best_nd = max(v for k, v in reg.items() if k[0] != k[1])   # == reg[base] here (base is non-draw)
+    draw_mass = sum(p for (H, A), p in g.items() if H == A)
+    freeroll = draw_mass * KO_PEN_KAPPA * 0.5 * 5
+    # best draw scoreline by regulation EV; exact-prob then geometry tiebreak within the draw class
+    draws = [(reg[k], g.get(k, 0.0), k) for k in reg if k[0] == k[1]]
+    bd_ev = max(c[0] for c in draws)
+    bd = min((c for c in draws if c[0] >= bd_ev - 1e-9),
+             key=lambda c: (-c[1], c[2][0] + c[2][1], c[2]))[2]
+    if reg[bd] + freeroll > best_nd:                     # draw + shootout free-roll beats the best non-draw
+        return bd, so_slot
+    return base, None
+
 def main(pull=False):
     if pull:
         import pull_data; pull_data.main()
@@ -81,9 +116,26 @@ def main(pull=False):
         pk = prev_by_id.get(f["id"])
         hs, as_ = str(f["hs"]), str(f["as"])
         if pk and hs.lstrip("-").isdigit() and as_.lstrip("-").isdigit():  # need real integer scores
-            pts = M.pts(pk[0], pk[1], int(hs), int(as_))
-            score += pts; exact += (pts == 12)
-            played.append((sp(f["home"]), pk, (f["hs"], f["as"]), sp(f["away"]), pts))
+            H, A = int(hs), int(as_)
+            base = M.pts(pk[0], pk[1], H, A)
+            # Felix KO shootout +5: only when WE predicted a DRAW (pk carries a stored shootout pick
+            # pk[2]) AND the game actually went to penalties — i.e. a knockout recorded as a level
+            # regulation/ET score (H==A; a KO can't truly end drawn). Scored against the positively
+            # confirmed actual shootout winner (competitor winner flag captured as f["win"]). Group
+            # draws never carry pk[2]; regulation-decided KO games (H!=A) get no shootout score.
+            so_pts, so_note = 0, ""
+            if len(pk) >= 3 and H == A:
+                # pk[2] and f["win"] are both SLOTS ("home"/"away") — compared directly so an ESPN team
+                # rename between the pre-pull (when the pick was stored) and the post-pull (the result)
+                # can never cause a false mismatch (the very drift the ID-keyed ledger defends against).
+                win = f.get("win")
+                so_pts = M.pts_shootout(pk[2], win)
+                pk_team = sp(f["home"] if pk[2] == "home" else f["away"])
+                win_team = sp(f["home"]) if win == "home" else (sp(f["away"]) if win == "away" else "??")
+                so_note = f"  [SO pick {pk_team} vs winner {win_team} -> +{so_pts}]"
+            pts = base + so_pts
+            score += pts; exact += (base == 12)   # exact = regulation scoreline hit, not the +5 bonus
+            played.append((sp(f["home"]), pk, (f["hs"], f["as"]), sp(f["away"]), pts, so_note))
 
     # 2) regenerate EV-max picks for all upcoming games + diff. Bucket by matchday/KO-date dynamically
     #    (group-stage -> FECHA 1/2/3; knockouts -> per-date KNOCKOUT headers, never mislabeled).
@@ -95,18 +147,27 @@ def main(pull=False):
         o = f.get("odds")
         if f["state"] != "pre":   # played OR in-play -> locked; never re-pick (live odds encode the score)
             mark = "PLAYED" if f["state"] == "post" else "LIVE — locked"
-            add(f["date"], (sp(f["home"]), f["hs"], f["as"], sp(f["away"]), mark))
+            add(f["date"], (sp(f["home"]), f["hs"], f["as"], sp(f["away"]), mark, None))
             continue
         if not o or any(o.get(k) is None for k in ("hml", "dml", "aml")):
             continue   # incomplete 3-way line -> can't fit; skip (don't crash the run)
-        lh, la = M.fit(o); pk = M.evpick(M.grid(lh, la)); n_picked += 1
-        ledger[f["id"]] = [f["home"], f["away"], list(pk)]   # update; keeps played-game picks intact
+        g = M.grid(*M.fit(o)); n_picked += 1
+        # Group stage: pure regulation EV-max (evpick). Knockout: ko_pick adds the Felix +5 shootout
+        # free-roll, which can flip a coin-flip game to a draw (+SO winner) — see ko_pick docstring.
+        _, lbl = bucket(f["date"])
+        if lbl.startswith("KNOCKOUT"):
+            pk, so_pick = ko_pick(g, o)
+        else:
+            pk, so_pick = M.evpick(g), None
+        entry = [int(pk[0]), int(pk[1])] + ([so_pick] if so_pick else [])
+        ledger[f["id"]] = [f["home"], f["away"], entry]   # update; keeps played-game picks intact
         op = prev_by_id.get(f["id"])
         tag = ""
-        if op and tuple(pk) != op:
+        if op and tuple(pk) != tuple(op[:2]):   # compare scoreline only (op may carry a 3rd SO element)
             tag = f"CHANGED (was {op[0]}-{op[1]})"
             changes.append((sp(f["home"]), op, pk, sp(f["away"])))
-        add(f["date"], (sp(f["home"]), pk[0], pk[1], sp(f["away"]), tag))
+        so_disp = sp(f["home"] if so_pick == "home" else f["away"]) if so_pick else None
+        add(f["date"], (sp(f["home"]), pk[0], pk[1], sp(f["away"]), tag, so_disp))
 
     # loud cutover guard: zero fresh picks usually means stale data or a KO-round date gap
     future_unscored = sum(1 for f in fixtures if f["state"] == "pre")
@@ -121,8 +182,8 @@ def main(pull=False):
     # 3) report
     print("=" * 60)
     print("PLAYED GAMES — our picks vs actual:")
-    for h, pk, ac, a, pts in played:
-        print(f"  {h:>11} {pk[0]}-{pk[1]} | actual {ac[0]}-{ac[1]} {a:<11} -> {pts} pts")
+    for h, pk, ac, a, pts, so_note in played:
+        print(f"  {h:>11} {pk[0]}-{pk[1]} | actual {ac[0]}-{ac[1]} {a:<11} -> {pts} pts{so_note}")
     print(f"  TOTAL on scored games: {score} pts, {exact} exact\n")
     print(f"PICK CHANGES from fresh odds: {len(changes)}")
     for h, op, pk, a in changes:
@@ -130,9 +191,10 @@ def main(pull=False):
     print("\nFULL SHEET (PLAYED = locked):")
     for key in sorted(rows_by_bucket):
         print(f"\n  --- {labels[key]} ---")
-        for h, x1, x2, a, tag in rows_by_bucket[key]:
+        for h, x1, x2, a, tag, so in rows_by_bucket[key]:
             mark = " ✓" if tag == "PLAYED" else (f"   <- {tag}" if tag else "")
-            print(f"    {h:>11} {x1}-{x2} {a:<11}{mark}")
+            so_s = f"   [+5 SO winner: {so}]" if so else ""
+            print(f"    {h:>11} {x1}-{x2} {a:<11}{mark}{so_s}")
 
     # 3b) CHAMPION / RUNNER-UP via the bracket simulator (folds in actual results; runner-up is the
     #     champion's most-likely FINAL opponent -> always from the OPPOSITE half, so the pair is achievable).

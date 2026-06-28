@@ -79,22 +79,21 @@ def fit_idx(C, tw, td, tl, ou, tgt, total_w=M.TOTAL_W, sup_w=M.SUP_W):
 
 
 def evpick(g, eps=M.EV_EPS):
-    """Vectorized wc_model.evpick on a (11,11) grid g. Same within-class exact-prob tiebreak + order."""
+    """Vectorized wc_model.evpick on a (11,11) grid g. Same within-class exact-prob tiebreak + the
+    same DETERMINISTIC geometry resolution (fewest total goals, then lowest (hp,ap)) wc_model uses on
+    residual EV/prob ties — so einsum-vs-scalar-sum ulp noise can never flip the pick vs wc_model
+    (see M._EV_TOL/M._PROB_TOL). __main__ asserts bit-equivalence across every live fixture."""
     ev = np.einsum("haHA,HA->ha", _PTS, g)         # (7,7) expected points per candidate
     k = int(np.argmax(ev))                          # first max in (hp-major, ap-minor) order
     hp0, ap0 = divmod(k, 7)
     ev_cls = M.rcls(hp0, ap0)
-    mx = ev[hp0, ap0]
-    best = None
-    for hp in range(7):
-        for ap in range(7):
-            if ev[hp, ap] >= mx - eps and M.rcls(hp, ap) == ev_cls:
-                ep = g[hp, ap]
-                # strict-with-tolerance: keep FIRST in (hp,ap) order on genuine ties (e.g. at
-                # integer lambda, Poisson P(k)=P(k-1)) so fp ulp noise can't flip the pick vs wc_model
-                if best is None or ep > best[0] + 1e-12:
-                    best = (ep, (hp, ap))
-    return best[1]
+    mx = float(ev[hp0, ap0])
+    allowed = [(float(g[hp, ap]), (hp, ap))
+               for hp in range(7) for ap in range(7)
+               if ev[hp, ap] >= mx - max(eps, M._EV_TOL) and M.rcls(hp, ap) == ev_cls]
+    pmax = max(p for p, _ in allowed)
+    tied = [hpap for p, hpap in allowed if p >= pmax - M._PROB_TOL]
+    return min(tied, key=lambda t: (t[0] + t[1], t))
 
 
 def grid_for(C, i, j):
