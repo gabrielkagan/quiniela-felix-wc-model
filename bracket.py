@@ -173,7 +173,7 @@ def market_title_probs(path=None):
     s = sum(out.values())
     return {t: p / s for t, p in out.items()} if s > 0 else {}
 
-def calibrate_to_market(market, known, iters=12, n=6000, seed=20260613, K=18.0, max_delta=220.0):
+def calibrate_to_market(market, known, iters=40, n=12000, seed=20260613, K=24.0, max_delta=220.0):
     """Iteratively nudge team ratings so the sim's title probabilities match the market's.
     R_t += K * log(market_t / sim_t): teams the sim under-rates vs the market get boosted, and
     vice-versa. Preserves the EXACT bracket structure; only the strengths are re-anchored.
@@ -181,7 +181,14 @@ def calibrate_to_market(market, known, iters=12, n=6000, seed=20260613, K=18.0, 
     Stability (title prob is a steep function of rating through the bracket, so naive steps diverge):
       - SMALL gain K with many iters (gradient descent, not a one-shot jump),
       - per-step move clipped to +/-K so a near-zero sim prob can't launch a longshot,
-      - total drift from Elo clipped to +/-max_delta so re-rating refines, never fabricates."""
+      - total drift from Elo clipped to +/-max_delta so re-rating refines, never fabricates.
+
+    Convergence (iters=40, n=12000, K=24): the prior (12, 6000, 18) was SYSTEMATICALLY under-converged
+    — 12 gradient steps could not close a ~2pt market gap on the top two, leaving a stable ~1.5% bias
+    that pinned the WRONG champion (Argentina robustly #1 across seeds) despite France leading the
+    title market 20.2% vs 18.1% on 2026-06-29. The richer schedule restores the market ordering
+    robustly across calibration seeds (France #1 in all of 5 tested), at ~30s vs ~5s — acceptable for
+    a once-daily run."""
     global _RATINGS
     R = dict(ELO)
     for it in range(iters):
