@@ -115,11 +115,59 @@ def load_known_results(path=None):
             known[frozenset((h, a))] = {h: hs, a: as_}
     return known
 
-def ko(a, b):
+def load_ko_eliminated(path=None, market_teams=None):
+    """Teams knocked OUT in already-played KNOCKOUT games (different-group post fixtures).
+
+    Without this the champion sim re-simulates the whole knockout from group standings and lets
+    teams that ALREADY lost a KO game (e.g. Netherlands, Germany) keep their raw Elo and 'win' sims,
+    leaking title mass to eliminated teams. `ko()` forces any eliminated team to lose wherever it
+    appears, which is equivalent to folding in the actual advancers.
+
+    Decided games -> loser is the lower score. Penalty-shootout games (regulation draw) are resolved
+    from the fixture's authoritative `win` slot ("home"/"away") — the same field daily_run trusts for
+    the +5 scoring — so a longshot shootout survivor can never be wrongly eliminated. Only if that slot
+    is missing do we fall back to the winner market (the eliminated team is the one ABSENT from it)."""
+    path = path or f"{DATA}/fixtures.json"
+    market_teams = market_teams if market_teams is not None else set(market_title_probs())
+    elim = set()
+    try:
+        fixtures = json.load(open(path))
+    except Exception:
+        return elim
+    for f in fixtures:
+        if f.get("state") != "post":
+            continue
+        h, a = _nm(f.get("home")), _nm(f.get("away"))
+        # KNOCKOUT game = both teams known AND from DIFFERENT groups (same-group => group stage)
+        if not (h in TEAM_GROUP and a in TEAM_GROUP and TEAM_GROUP[h] != TEAM_GROUP[a]):
+            continue
+        try:
+            hs, as_ = int(f["hs"]), int(f["as"])
+        except (TypeError, ValueError):
+            continue
+        if hs > as_:
+            elim.add(a)
+        elif as_ > hs:
+            elim.add(h)
+        else:                                   # regulation draw -> penalty shootout
+            win = f.get("win")                  # authoritative advancer slot (as daily_run's +5 uses)
+            if win == "home":   elim.add(a)
+            elif win == "away": elim.add(h)
+            elif market_teams:                  # fallback only if win slot missing: survivor stays priced
+                if h not in market_teams: elim.add(h)
+                if a not in market_teams: elim.add(a)
+    return elim
+
+def ko(a, b, elim=None):
+    # fold in already-played KO results: an eliminated team always loses wherever it's paired
+    if elim:
+        ea, eb = a in elim, b in elim
+        if ea != eb:
+            return b if ea else a
     pa = 1.0 / (1.0 + 10 ** (-(elo(a) - elo(b)) / 400.0))
     return a if random.random() < pa else b
 
-def sim_tournament(known=None):
+def sim_tournament(known=None, elim=None):
     winners, runners, thirds = {}, {}, []
     for g, teams in GROUPS.items():
         rank, pts, gf, ga = sim_group(teams, known)
@@ -130,11 +178,11 @@ def sim_tournament(known=None):
     def fill(slot):
         kind, key = slot
         return winners[key] if kind == "W" else runners[key] if kind == "R" else top8[key]
-    r32w = [ko(fill(s1), fill(s2)) for s1, s2 in R32]
-    r16w = [ko(r32w[i], r32w[j]) for i, j in R16]
-    qfw  = [ko(r16w[i], r16w[j]) for i, j in QF]
-    sfw  = [ko(qfw[i], qfw[j]) for i, j in SF]
-    champ = ko(sfw[0], sfw[1])
+    r32w = [ko(fill(s1), fill(s2), elim) for s1, s2 in R32]
+    r16w = [ko(r32w[i], r32w[j], elim) for i, j in R16]
+    qfw  = [ko(r16w[i], r16w[j], elim) for i, j in QF]
+    sfw  = [ko(qfw[i], qfw[j], elim) for i, j in SF]
+    champ = ko(sfw[0], sfw[1], elim)
     runner = sfw[1] if champ == sfw[0] else sfw[0]
     return champ, runner
 
@@ -173,7 +221,7 @@ def market_title_probs(path=None):
     s = sum(out.values())
     return {t: p / s for t, p in out.items()} if s > 0 else {}
 
-def calibrate_to_market(market, known, iters=40, n=12000, seed=20260613, K=24.0, max_delta=220.0):
+def calibrate_to_market(market, known, elim=None, iters=40, n=12000, seed=20260613, K=24.0, max_delta=220.0):
     """Iteratively nudge team ratings so the sim's title probabilities match the market's.
     R_t += K * log(market_t / sim_t): teams the sim under-rates vs the market get boosted, and
     vice-versa. Preserves the EXACT bracket structure; only the strengths are re-anchored.
@@ -196,7 +244,7 @@ def calibrate_to_market(market, known, iters=40, n=12000, seed=20260613, K=24.0,
         random.seed(seed + it)
         champs = Counter()
         for _ in range(n):
-            c, _r = sim_tournament(known); champs[c] += 1
+            c, _r = sim_tournament(known, elim); champs[c] += 1
         for t, mp in market.items():
             sp = champs.get(t, 0) / n
             step = K * math.log(max(mp, 1e-4) / max(sp, 1e-4))
@@ -210,8 +258,9 @@ def run(n=20000, seed=20260613, known=None, use_market=True):
     if known is None:
         known = load_known_results()
     market = market_title_probs() if use_market else {}
+    elim = load_ko_eliminated(market_teams=set(market))  # fold in already-played KO results
     if market:
-        _RATINGS = calibrate_to_market(market, known)
+        _RATINGS = calibrate_to_market(market, known, elim)
         anchor = "market-anchored (odds-api title odds)"
     else:
         _RATINGS = dict(ELO)
@@ -219,7 +268,7 @@ def run(n=20000, seed=20260613, known=None, use_market=True):
     random.seed(seed)
     champs = Counter(); finals = Counter()  # finals[(champ,runner)]
     for _ in range(n):
-        c, r = sim_tournament(known); champs[c] += 1; finals[(c, r)] += 1
+        c, r = sim_tournament(known, elim); champs[c] += 1; finals[(c, r)] += 1
     champ = champs.most_common(1)[0][0]
     # runner-up = most common FINAL OPPONENT of the chosen champion (opposite-half by construction)
     opp = Counter({r: cnt for (c, r), cnt in finals.items() if c == champ})
