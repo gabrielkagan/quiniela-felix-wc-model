@@ -1,7 +1,7 @@
 """Vectorized, parameter-tunable twin of wc_model — for the calibration search ONLY.
 
 WHY: wc_model.fit() brute-forces an (lambda_h, lambda_a) grid per match in pure Python (~0.4s each),
-so one pass over the 3,800-match backtest corpus is ~25 min. A stage-2 calibration search re-runs the
+so one pass over the 3,504-match backtest corpus is ~25 min. A stage-2 calibration search re-runs the
 corpus for every candidate parameter set, which is infeasible at that speed. KEY INSIGHT: the (lh,la)
 candidate GRIDS are identical across matches — only the fit OBJECTIVE (de-vigged targets, O/U,
 supremacy) changes per match. So we precompute the grid tensor ONCE per parameter set and vectorize

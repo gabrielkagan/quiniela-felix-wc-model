@@ -33,40 +33,71 @@ def bucket(d):
     iso = dt.strftime('%Y-%m-%d')
     return ((1, iso), f"KNOCKOUT {iso}")
 
-# KO objective extends the regulation EV-max pick (evpick) with the Felix +5 penalty-shootout free-roll,
-# which is unlocked ONLY by predicting a DRAW. So total E[pts] for a KO scoreline = regulation E[pts]
-# + (for a draw) P(reach pens)·P(SO pick correct)·5. We proxy P(reach pens) = draw_mass·KO_PEN_KAPPA
-# (the share of 90-min draws that survive extra time to penalties; ~half historically) and
-# P(SO correct) = 0.5 (a shootout is ~a coinflip; the small favorite edge is ignored, conservatively).
-# The single resulting flip-to-draw is robustness-checked stable across KO_PEN_KAPPA ∈ [0.30, 0.50].
-# HARD GUARDRAIL: never punt a clear market favorite (de-vig win prob ≥ 0.5) to a draw.
-# evpick (wc_model) stays the pure-regulation, validation-gated engine; this layer only adds the KO +5.
-KO_PEN_KAPPA = 0.50
-def ko_pick(g, o):
-    """Knockout pick. Returns (scoreline, so_slot|None): so_slot is 'home'/'away' when we predict a draw
-    (the stronger de-vig side is the +5 shootout pick — a SLOT, never a name, so ESPN renames can't drift
-    it), else None. A draw is chosen over the best non-draw only when its regulation EV plus the shootout
-    free-roll wins AND no clear favorite would be punted."""
-    base = M.evpick(g)                                   # validated regulation EV-max scoreline
+# KO objective: Felix grades the RECORDED final score — the 90' score when decided in regulation, the
+# after-EXTRA-TIME score otherwise (pens games keep the level 120' score; the shootout is a separate
+# +5). Verified against the live 540-pt reconcile 2026-07-11: both AET games (Bélgica 3-2, Argentina
+# 3-2) discriminate — a 90'-basis grader would produce 534-537, not the actual 540. The 90' Dixon-
+# Coles grid is therefore the WRONG grading basis for KO picks: it credits a draw pick with the full
+# 90'-draw mass (a 90' draw survives to a RECORDED draw only when ET stays level) and denies non-draw
+# picks their AET-decided hits — a systematic pro-draw bias in the one cross-class decision this layer
+# makes (adv 2026-07-11 MAJOR-2; on France-España it inflated the draw to a false 0.04-pt knife-edge
+# vs a true ~1.5-pt gap). ko_recorded_grid() corrects the basis: 90' non-draws stand; 90' draws get 30
+# minutes of extra-time goals at lambda/3 per side (independent Poisson — the Dixon-Coles tau is a
+# 90'-only low-score correction, not re-applied to the ET increment). The +5 shootout free-roll
+# (unlocked ONLY by predicting a draw) now uses the model-derived P(level after 120') — replacing the
+# retired KO_PEN_KAPPA point estimate — times P(SO correct)=0.5 (a shootout is ~a coinflip; the small
+# favorite edge is ignored, conservatively).
+# HARD GUARDRAIL unchanged: never punt a clear market favorite (de-vig win prob ≥ 0.5) to a draw.
+# evpick (wc_model) stays the pure-regulation, validation-gated engine for GROUP games; this KO layer
+# owns the recorded-score grading basis + the +5 free-roll.
+_ET_GOALS_MAX = 8  # per-side ET-goal truncation; <1e-8 mass at live lambdas (lambda/3 <= 0.6), and
+                   # ko_recorded_grid renormalizes, so truncation is behaviorally nil even at
+                   # extreme fits (P(>8 | lambda/3=1.8) ~ 1e-4 pre-normalization)
+
+def ko_recorded_grid(g, lh, la):
+    """ET-corrected RECORDED-final-score distribution from a 90' grid. Returns (R, p_pens):
+    R[(H,A)] = P(recorded final is H-A); p_pens = P(level after 120' -> shootout)."""
+    eth = [M.pois(k, lh / 3.0) for k in range(_ET_GOALS_MAX + 1)]
+    eta = [M.pois(k, la / 3.0) for k in range(_ET_GOALS_MAX + 1)]
+    R, p_pens = {}, 0.0
+    for (h, a), p in g.items():
+        if h != a:
+            R[(h, a)] = R.get((h, a), 0.0) + p
+            continue
+        for eh, qh in enumerate(eth):
+            for ea, qa in enumerate(eta):
+                q = p * qh * qa
+                key = (h + eh, a + ea)
+                R[key] = R.get(key, 0.0) + q
+                if eh == ea:
+                    p_pens += q
+    s = sum(R.values())
+    return {k: v / s for k, v in R.items()}, p_pens / s
+
+def ko_pick(g, o, lh, la):
+    """Knockout pick: EV-max over the RECORDED-score distribution (see block comment above), with the
+    +5 shootout free-roll added to draw picks. Returns (scoreline, so_slot|None): so_slot is
+    'home'/'away' when we predict a draw (the stronger de-vig side is the +5 shootout pick — a SLOT,
+    never a name, so ESPN renames can't drift it), else None. A draw wins only when its recorded-basis
+    EV + free-roll beats every non-draw AND no clear favorite (de-vig ≥ 0.5) would be punted."""
+    R, p_pens = ko_recorded_grid(g, lh, la)
     tw, _td, tl = M.devig(o)
     so_slot = "home" if tw >= tl else "away"
-    if base[0] == base[1]:                               # regulation EV-max is already a draw -> +5 unlocked
-        return base, so_slot
-    if max(tw, tl) >= 0.5:                               # clear favorite -> never punt to a draw
-        return base, None
-    reg = {(hp, ap): sum(p * M.pts(hp, ap, H, A) for (H, A), p in g.items())
-           for hp in range(7) for ap in range(7)}
-    best_nd = max(v for k, v in reg.items() if k[0] != k[1])   # == reg[base] here (base is non-draw)
-    draw_mass = sum(p for (H, A), p in g.items() if H == A)
-    freeroll = draw_mass * KO_PEN_KAPPA * 0.5 * 5
-    # best draw scoreline by regulation EV; exact-prob then geometry tiebreak within the draw class
-    draws = [(reg[k], g.get(k, 0.0), k) for k in reg if k[0] == k[1]]
-    bd_ev = max(c[0] for c in draws)
-    bd = min((c for c in draws if c[0] >= bd_ev - 1e-9),
-             key=lambda c: (-c[1], c[2][0] + c[2][1], c[2]))[2]
-    if reg[bd] + freeroll > best_nd:                     # draw + shootout free-roll beats the best non-draw
-        return bd, so_slot
-    return base, None
+    freeroll = p_pens * 0.5 * 5
+    ev = {(hp, ap): sum(p * M.pts(hp, ap, H, A) for (H, A), p in R.items())
+          + (freeroll if hp == ap else 0.0)
+          for hp in range(7) for ap in range(7)}
+    def best_in(keys):
+        # mirror evpick's tiebreak, on the RECORDED grid: EV, then exact-prob, then geometry
+        mx = max(ev[k] for k in keys)
+        tied = [k for k in keys if ev[k] >= mx - 1e-9]
+        pm = max(R.get(k, 0.0) for k in tied)
+        tied = [k for k in tied if R.get(k, 0.0) >= pm - 1e-12]
+        return min(tied, key=lambda k: (k[0] + k[1], k))
+    best = best_in(list(ev))
+    if best[0] == best[1] and max(tw, tl) >= 0.5:        # clear favorite -> never punt to a draw
+        best = best_in([k for k in ev if k[0] != k[1]])
+    return best, (so_slot if best[0] == best[1] else None)
 
 def main(pull=False):
     if pull:
@@ -134,7 +165,7 @@ def main(pull=False):
                 win_team = sp(f["home"]) if win == "home" else (sp(f["away"]) if win == "away" else "??")
                 so_note = f"  [SO pick {pk_team} vs winner {win_team} -> +{so_pts}]"
             pts = base + so_pts
-            score += pts; exact += (base == 12)   # exact = regulation scoreline hit, not the +5 bonus
+            score += pts; exact += (base == 12)   # exact = recorded-score hit (90'/AET), not the +5 bonus
             played.append((sp(f["home"]), pk, (f["hs"], f["as"]), sp(f["away"]), pts, so_note))
 
     # 2) regenerate EV-max picks for all upcoming games + diff. Bucket by matchday/KO-date dynamically
@@ -151,12 +182,12 @@ def main(pull=False):
             continue
         if not o or any(o.get(k) is None for k in ("hml", "dml", "aml")):
             continue   # incomplete 3-way line -> can't fit; skip (don't crash the run)
-        g = M.grid(*M.fit(o)); n_picked += 1
-        # Group stage: pure regulation EV-max (evpick). Knockout: ko_pick adds the Felix +5 shootout
-        # free-roll, which can flip a coin-flip game to a draw (+SO winner) — see ko_pick docstring.
+        lh, la = M.fit(o); g = M.grid(lh, la); n_picked += 1
+        # Group stage: pure regulation EV-max (evpick). Knockout: ko_pick re-grades on the ET-corrected
+        # RECORDED-score basis + the Felix +5 shootout free-roll (draw picks only) — see block comment.
         _, lbl = bucket(f["date"])
         if lbl.startswith("KNOCKOUT"):
-            pk, so_pick = ko_pick(g, o)
+            pk, so_pick = ko_pick(g, o, lh, la)
         else:
             pk, so_pick = M.evpick(g), None
         entry = [int(pk[0]), int(pk[1])] + ([so_pick] if so_pick else [])

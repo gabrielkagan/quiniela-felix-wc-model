@@ -11,6 +11,19 @@ bracket sim is **re-rated to the betting market's title odds** (`bracket.calibra
 Elo. **Reviewers MUST NOT run `daily_run.py --pull` or `pull_odds_api.py`** — they spend paid the-odds-
 api credits. Run `daily_run.py` (no --pull), `fast_model.py` (equivalence twin), `validate.py` instead.
 
+## KO RECORDED-BASIS + TOTALS OVERLAY (SHIPPED 2026-07-11) — read before reviewing
+`consensus.py` ALSO overrides `ou` from the multi-book totals curve (`market_total()`: the
+P(over)=0.5 crossing), so overlaid pre games carry `provider: consensus(odds-api)` with a consensus
+total, NOT ESPN's flat 2.5. Knockout picks come from `daily_run.ko_pick(g, o, lh, la)`, which is
+EV-max over the ET-corrected **RECORDED-final-score distribution** (`ko_recorded_grid`: 90' draws
+extended with extra-time goals at lambda/3 a side; Felix grades the recorded score — verified by the
+live standings reconcile) plus the +5 shootout free-roll (p_pens·0.5·5) on draw picks only.
+`stage3.py` (shadow endgame rank monitor, never changes live picks) reads live standings from
+`data/standings.json` (loud fallback + games_played-vs-fixtures ABORT) and searches single-game
+deviations on a prize-weighted EV$ objective — two-stage: best candidate SELECTED on DEV_DRAWS,
+then CONFIRMED on disjoint DEV_CONFIRM_DRAWS, both stages $-floor + z-gated, plus a horizon guard
+(no verdict while unpriced games remain); its P(top-K) table averages over SEEDS.
+
 ## Scoring rule (the objective function)
 - Exact score (both teams' goals) = **12 pts**
 - Correct result only (winner or draw) = **5 pts**
@@ -33,8 +46,10 @@ api credits. Run `daily_run.py` (no --pull), `fast_model.py` (equivalence twin),
   Argentina-Portugal semifinals). APPROX: best-third-place slotting (8 thirds into 8 slots in match order
   — thirds are weak, negligible effect on title odds). Elo title probs run HOTTER than the market (Elo is
   more decisive) — the PICK (champion + opposite-half runner-up) is what's used and is robust to that.
+- `~/wc-pool/stage3.py` — SHADOW endgame rank monitor (prize-weighted deviation search; never changes live picks).
 - `~/wc-pool/data/elo.json` — World Football Elo ratings per team (bracket-sim strength input).
 - `~/wc-pool/data/fixtures.json` — fixtures: id, date, state(pre/in/post), home, away, hs/as, odds{hml,dml,aml,spread,ou,provider}.
+- `~/wc-pool/data/standings.json` — live pool leaderboard snapshot consumed by stage3 (us/top/n_field/games_played).
 
 ## Method (already converged through a multi-round adversarial review — see wc_model.py docstring)
 1. De-vig DraftKings 3-way moneylines -> true P(home/draw/away).
@@ -43,8 +58,9 @@ api credits. Run `daily_run.py` (no --pull), `fast_model.py` (equivalence twin),
    exact-prob tiebreak only (free; never punts a clear favorite). Variance-chasing was REJECTED.
 
 ## What the DAILY review must verify (find CRITICAL/MAJOR only)
-1. DATA INTEGRITY of today's fresh pull: every pre game has real DraftKings hml/dml/aml; played
-   games correctly marked 'post' and excluded from picks; no None/stale/duplicate; team↔odds join correct.
+1. DATA INTEGRITY of today's fresh pull: every pre game has a real, complete 3-way line (consensus
+   provider after overlay, or ESPN DraftKings fallback); played games correctly marked 'post' and
+   excluded from picks; no None/stale/duplicate; team↔odds join correct.
 2. SCORING: played-game points computed correctly under 12/5/2 (pts()).
 3. PICK SANITY: regenerate all picks; flag ANY pick whose predicted result has <25% de-vigged
    market probability, any punt of a clear favorite (devig >= 0.5), or any indefensible scoreline.

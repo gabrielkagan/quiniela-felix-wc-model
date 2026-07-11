@@ -28,7 +28,7 @@ python3 daily_run.py --pull
 | `daily_run.py` | Orchestrator: scores played games, regenerates picks, prints the sheet by fecha. |
 | `pull_data.py` | Fetches fixtures + odds (ESPN public API) with an abort-guard on degraded pulls. |
 | `bracket.py` | Monte-Carlo champion / runner-up (opposite-half consistent). |
-| `validate.py` | **Stage 0** backtest harness — scores the model vs naive rules on ~3,800 historical matches. |
+| `validate.py` | **Stage 0** backtest harness — scores the model vs naive rules on ~3,500 historical matches. |
 | `data/elo.json` | World Football Elo ratings (bracket-sim input). |
 
 ## How the pick rule works
